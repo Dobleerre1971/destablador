@@ -652,12 +652,10 @@ Ejemplo exacto de salida: [{"Distancia (km)": "13,884", "Tiempo": "00:20:02,5"},
         });
       });
 
-      // Endpoints oficiales exactos de Google
+      // Endpoint oficial directo Gemini 2.0 Flash
       const endpointsToTry = [
         `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${apiKey}`,
-        `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash-latest:generateContent?key=${apiKey}`,
-        `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent?key=${apiKey}`
+        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-exp:generateContent?key=${apiKey}`
       ];
 
       let lastErr = null;
