@@ -655,10 +655,10 @@ Ejemplo exacto de salida: [{"Distancia (km)": "13,884", "Tiempo": "00:20:02,5"},
 
       const modelsToTry = [
         "gemini-2.0-flash",
-        "gemini-1.5-flash-8b"
+        "gemini-2.0-flash-lite"
       ];
 
-      let lastErr = null;
+      let allErrors = [];
 
       for (const model of modelsToTry) {
         try {
@@ -679,13 +679,14 @@ Ejemplo exacto de salida: [{"Distancia (km)": "13,884", "Tiempo": "00:20:02,5"},
             const text = data.candidates[0].content.parts[0].text;
             return cleanJsonOutput(text);
           } else {
-            lastErr = await response.text();
+            const errText = await response.text();
+            allErrors.push(`[${model}]: ${errText}`);
           }
         } catch (e) {
-          lastErr = e.message;
+          allErrors.push(`[${model}]: ${e.message}`);
         }
       }
-      throw new Error(lastErr || "Error al conectar con Gemini");
+      throw new Error(allErrors.join(" | ") || "Error al conectar con Gemini");
     }
 
     // --- 2. OPENAI GPT-4o MINI ---
@@ -734,8 +735,7 @@ Ejemplo exacto de salida: [{"Distancia (km)": "13,884", "Tiempo": "00:20:02,5"},
       });
 
       const modelsToTry = [
-        "llama-3.2-90b-vision-preview",
-        "llama-3.3-70b-versatile"
+        "llama-3.2-90b-vision-preview"
       ];
 
       let lastError = null;
