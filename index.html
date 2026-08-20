@@ -493,25 +493,29 @@
   </footer>
 
   <script>
-    const PROMPT_GLOBAL = `Eres un escáner robótico de alta precisión para tablas de tiempos de rally de regularidad.
-Te voy a pasar una imagen de una página de un rutómetro. Tu ÚNICO objetivo es extraer la DISTANCIA TOTAL y el TIEMPO ACUMULADO de TODAS las tablas presentes en la imagen.
+    const PROMPT_GLOBAL = `Eres un OCR de precisión militar y máxima velocidad para tablas de tiempos de rally.
+Tu objetivo es extraer la DISTANCIA y el TIEMPO ACUMULADO de TODAS las tablas de la imagen.
 
-¡ALERTA CRÍTICA DE DISEÑO MULTICOLUMNA! LA IMAGEN TIENE VARIAS COLUMNAS DE TABLAS LADO A LADO.
-ES ESTRICTAMENTE OBLIGATORIO QUE LEAS TODAS LAS COLUMNAS SIN DEJARTE NINGUNA:
-1. Primero, lee TODA la columna/tabla de la izquierda, desde la primera fila hasta la última abajo del todo.
-2. Cuando termines la izquierda, SALTA a la siguiente columna/tabla que esté a su derecha y léela entera de arriba a abajo.
-3. Repite este proceso escaneando hacia la derecha hasta que no quede ninguna tabla en la hoja.
+ESTRUCTURA DE LA HOJA:
+- Hay VARIAS COLUMNAS de tablas lado a lado.
+- Lee de izquierda a derecha: empieza por la columna 1 de arriba a abajo, luego la columna 2 de arriba a abajo, etc.
 
-INSTRUCCIONES MILITARES DE EXTRACCIÓN (PROHIBIDO OMITIR DATOS):
-- EXTRAER TODO: Tienes que extraer TODAS Y CADA UNA DE LAS FILAS. Está PROHIBIDO resumir, acortar o terminar antes de tiempo.
-- IGNORA CABECERAS Y PARCIALES: Ignora logos, títulos, medias impuestas, texto publicitario y distancias parciales. Solo extrae la Distancia TOTAL.
+REGLAS DE INTERPRETACIÓN:
+1. DISTANCIA (columna "Hasta" o "Dist"):
+   - Si está en metros (ej. 100, 200, 1.000, 5.100, 10.100, 23.319), CONVIÉRTELA a kilómetros con 3 decimales usando coma:
+     100 -> "0,100"
+     1.000 -> "1,000"
+     5.100 -> "5,100"
+     10.100 -> "10,100"
+     23.319 -> "23,319"
+2. TIEMPO (columnas "H", "MIN", "SEG" o "Tiempo"):
+   - Combina las columnas en formato "HH:MM:SS,d" (ej: H:0, MIN:07, SEG:19,1 -> "00:07:19,1").
+   - Si no tiene decimales en segundos, añade ,0 (ej: H:0, MIN:01, SEG:9 -> "00:01:09,0").
+3. Ignora encabezados, logos, notas a mano o tachones (lee el número original). Extrae TODAS las filas.
 
-REGLAS DE FORMATO Y TRADUCCIÓN DE TIEMPO (CRÍTICO):
-- Convierte la Distancia a Kilómetros (ej. "0,100" o "13,884").
-- PROHIBIDO usar letras (h, m, s) o símbolos de minutos/segundos (', ") en tu respuesta final. Todo debe ser numérico separado por dos puntos.
-
-REGLA DE SALIDA ESTRICTA: Devuelve SOLO un array JSON válido y limpio con todas las filas encontradas. 
-Ejemplo exacto de salida: [{"Distancia (km)": "13,884", "Tiempo": "00:20:02,5"}, {"Distancia (km)": "14,153", "Tiempo": "00:20:19,8"}]`;
+FORMATO DE SALIDA (ESTRICTAMENTE ARRAY COMPACTO PARA MÁXIMA VELOCIDAD):
+Devuelve SOLO un array JSON de pares [distancia, tiempo]:
+[["0,100", "00:00:07,5"], ["0,200", "00:00:15,0"], ["5,100", "00:07:19,1"]]`;
 
     let fileQueue = [];
     let calculatedSpeeds = [];
@@ -633,14 +637,36 @@ Ejemplo exacto de salida: [{"Distancia (km)": "13,884", "Tiempo": "00:20:02,5"},
         }
         return [text];
       }
-      const match = text.match(/\[.*\]/s);
-      let clean = match ? match[0] : text.replace(/```json/g, '').replace(/```/g, '').trim();
+      let clean = text.replace(/```json/g, '').replace(/```/g, '').trim();
+      const firstBracket = clean.indexOf('[');
+      if (firstBracket !== -1) {
+        clean = clean.substring(firstBracket);
+        const lastBracket = clean.lastIndexOf(']');
+        if (lastBracket !== -1) {
+          clean = clean.substring(0, lastBracket + 1);
+        } else {
+          // Si quedó cortado, intentar cerrar el JSON
+          const lastComma = clean.lastIndexOf('],');
+          if (lastComma !== -1) {
+            clean = clean.substring(0, lastComma + 1) + ']';
+          } else {
+            clean = clean + ']';
+          }
+        }
+      }
       clean = clean.replace(/,\s*\]/g, ']');
       try {
         const parsed = JSON.parse(clean);
-        return Array.isArray(parsed) ? parsed : (parsed.rows || parsed.tablas || [parsed]);
+        return Array.isArray(parsed) ? parsed : (parsed.rows || parsed.tablas || parsed.data || [parsed]);
       } catch (_) {
-        return [];
+        // Extractor de emergencia si el JSON está roto
+        const rows = [];
+        const regex = /\[\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\]/g;
+        let match;
+        while ((match = regex.exec(text)) !== null) {
+          rows.push([match[1], match[2]]);
+        }
+        return rows;
       }
     }
 
@@ -654,8 +680,8 @@ Ejemplo exacto de salida: [{"Distancia (km)": "13,884", "Tiempo": "00:20:02,5"},
       });
 
       const modelsToTry = [
-        "gemini-3.6-flash",
-        "gemini-3.5-flash-lite"
+        "gemini-3.5-flash-lite",
+        "gemini-3.6-flash"
       ];
 
       let allErrors = [];
@@ -669,7 +695,8 @@ Ejemplo exacto de salida: [{"Distancia (km)": "13,884", "Tiempo": "00:20:02,5"},
               contents: [{ parts: parts }],
               generationConfig: { 
                 temperature: 0.0, 
-                maxOutputTokens: 8192
+                maxOutputTokens: 8192,
+                responseMimeType: "application/json"
               }
             })
           });
@@ -866,18 +893,29 @@ Ejemplo exacto de salida: [{"Distancia (km)": "13,884", "Tiempo": "00:20:02,5"},
 
       const btn = document.getElementById('btnProcess');
       btn.disabled = true;
-      btn.innerHTML = `<span class="spinner"></span> Procesando en paralelo...`;
+      btn.innerHTML = `<span class="spinner"></span> Procesando páginas en paralelo...`;
 
       try {
-        const promises = fileQueue.map(async (file, idx) => {
-          const base64Imgs = await convertFileToImagesBase64(file);
-          return await processImagesWithAI(base64Imgs);
-        });
+        // Extraer todas las páginas/imágenes de todos los archivos seleccionados
+        let allPages = [];
+        for (const file of fileQueue) {
+          const imgs = await convertFileToImagesBase64(file);
+          allPages = allPages.concat(imgs);
+        }
 
+        if (allPages.length === 0) {
+          throw new Error("No se pudieron cargar las imágenes de los archivos.");
+        }
+
+        // Procesar CADA PÁGINA de forma simultánea e independiente
+        const promises = allPages.map(b64 => processImagesWithAI([b64]));
         const results = await Promise.all(promises);
+
         let totalRows = [];
         results.forEach(rows => {
-          if (rows && rows.length > 0) totalRows = totalRows.concat(rows);
+          if (rows && rows.length > 0) {
+            totalRows = totalRows.concat(rows);
+          }
         });
 
         if (totalRows.length > 0) {
@@ -900,8 +938,15 @@ Ejemplo exacto de salida: [{"Distancia (km)": "13,884", "Tiempo": "00:20:02,5"},
       tbody.innerHTML = '';
       rows.forEach(r => {
         const tr = document.createElement('tr');
-        const dist = r["Distancia (km)"] || r.distancia || "";
-        const time = r["Tiempo"] || r.tiempo || "";
+        let dist = "";
+        let time = "";
+        if (Array.isArray(r)) {
+          dist = r[0] || "";
+          time = r[1] || "";
+        } else if (typeof r === 'object' && r !== null) {
+          dist = r["Distancia (km)"] || r.distancia || r.dist || r.d || "";
+          time = r["Tiempo"] || r.tiempo || r.time || r.t || "";
+        }
         tr.innerHTML = `
           <td><input class="table-cell-input" type="text" value="${dist}" oninput="recalculateSpeeds()"></td>
           <td><input class="table-cell-input" type="text" value="${time}" oninput="recalculateSpeeds()"></td>
