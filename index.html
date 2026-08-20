@@ -429,6 +429,7 @@
                 <tr>
                   <th>Distancia (km)</th>
                   <th>Media (km/h)</th>
+                  <th>Tiempo de Paso</th>
                 </tr>
               </thead>
               <tbody id="tbodySpeeds">
@@ -974,11 +975,54 @@ Devuelve SOLO un array JSON de pares [distancia, tiempo]:
       recalculateSpeeds();
     }
 
-    // --- CÁLCULO DE MEDIAS ---
+    function parseTimeToSeconds(tStr) {
+      if (!tStr) return 0;
+      tStr = tStr.trim();
+      const partes = tStr.split(':');
+      
+      if (partes.length === 1) {
+        return parseFloat(partes[0].replace(',', '.')) || 0;
+      } else if (partes.length === 2) {
+        // MM:SS o MM:SS,d
+        const m = parseInt(partes[0]) || 0;
+        const s = parseFloat(partes[1].replace(',', '.')) || 0;
+        return m * 60 + s;
+      } else if (partes.length === 3) {
+        // Si viene en formato MM:SS:d (ej. 16:11:4 o 00:07:2 donde el último elemento es 1 solo dígito de décima)
+        if (partes[2].length === 1) {
+          const m = parseInt(partes[0]) || 0;
+          const s = parseInt(partes[1]) || 0;
+          const d = parseInt(partes[2]) || 0;
+          return m * 60 + s + (d / 10.0);
+        }
+        // Si viene en formato HH:MM:SS,d o HH:MM:SS
+        const h = parseInt(partes[0]) || 0;
+        const m = parseInt(partes[1]) || 0;
+        const s = parseFloat(partes[2].replace(',', '.')) || 0;
+        // En regularidad los tramos no duran >10h; si h >= 10 es MM:SS:centésimas (ej: 16:11:04)
+        if (h >= 10 && m < 60 && s < 60 && !partes[2].includes(',') && !partes[2].includes('.')) {
+          return h * 60 + m + (s / 100.0);
+        }
+        return h * 3600 + m * 60 + s;
+      }
+      return 0;
+    }
+
+    function formatSecsToTime(sec) {
+      if (isNaN(sec) || sec < 0) sec = 0;
+      const h = Math.floor(sec / 3600);
+      const m = Math.floor((sec % 3600) / 60);
+      const s = (sec % 60).toFixed(1);
+      const sParts = s.split('.');
+      const intSec = String(sParts[0]).padStart(2, '0');
+      const decSec = sParts[1] || '0';
+      return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${intSec},${decSec}`;
+    }
+
+    // --- CÁLCULO INTELIGENTE DE MEDIAS Y TIEMPO DE PASO ---
     function recalculateSpeeds() {
       const trs = document.querySelectorAll('#tbodyExtracted tr');
-      const pointSpeeds = [];
-      const distancias = [];
+      const data = [];
       let prev_d = 0.0, prev_t = 0.0;
 
       trs.forEach(tr => {
@@ -987,50 +1031,69 @@ Devuelve SOLO un array JSON de pares [distancia, tiempo]:
           const dStr = inputs[0].value.trim().replace(',', '.');
           const tStr = inputs[1].value.trim();
           const d = parseFloat(dStr) || 0.0;
-
-          const partes = tStr.split(':');
-          let t = prev_t;
-          if (partes.length === 2) {
-            t = parseInt(partes[0]) * 60 + parseFloat(partes[1].replace(',', '.'));
-          } else if (partes.length === 3) {
-            t = parseInt(partes[0]) * 3600 + parseInt(partes[1]) * 60 + parseFloat(partes[2].replace(',', '.'));
-          }
+          const t = parseTimeToSeconds(tStr);
 
           const delta_d = d - prev_d;
           const delta_t = t - prev_t;
-          const v = delta_t > 0 ? (delta_d / (delta_t / 3600.0)) : 0.0;
+          const inst_v = (delta_t > 0 && delta_d > 0) ? (delta_d / (delta_t / 3600.0)) : 0.0;
 
-          distancias.push(d);
-          pointSpeeds.push(Math.round(v * 100) / 100);
+          data.push({
+            d: d,
+            t: t,
+            tStr: tStr,
+            v: inst_v
+          });
+
           prev_d = d;
           prev_t = t;
         }
       });
 
-      const final_d = [];
-      const final_v = [];
+      if (data.length === 0) {
+        calculatedSpeeds = [];
+        renderSpeedsTable([]);
+        return;
+      }
 
-      if (pointSpeeds.length > 0) {
-        let curr_v = pointSpeeds[0];
-        for (let i = 1; i < pointSpeeds.length; i++) {
-          if (pointSpeeds[i] !== curr_v) {
-            final_d.push(distancias[i - 1]);
-            final_v.push(curr_v);
-            curr_v = pointSpeeds[i];
-          }
+      // Agrupación de tramos de velocidad constante con tolerancia para jitter de décimas
+      const sections = [];
+      let secStartIdx = 0;
+      let currSectionSpeed = data[0].v;
+
+      for (let i = 1; i < data.length; i++) {
+        const secDist = data[i].d - (secStartIdx === 0 ? 0 : data[secStartIdx - 1].d);
+        const secTime = data[i].t - (secStartIdx === 0 ? 0 : data[secStartIdx - 1].t);
+        const avgSectionSpeed = secTime > 0 ? (secDist / (secTime / 3600.0)) : currSectionSpeed;
+
+        // Cambio real de media (salto mayor a 1.8 km/h)
+        if (data[i].v > 0 && Math.abs(data[i].v - avgSectionSpeed) > 1.8) {
+          const finalSecDist = data[i - 1].d - (secStartIdx === 0 ? 0 : data[secStartIdx - 1].d);
+          const finalSecTime = data[i - 1].t - (secStartIdx === 0 ? 0 : data[secStartIdx - 1].t);
+          const computedSpeed = finalSecTime > 0 ? (finalSecDist / (finalSecTime / 3600.0)) : currSectionSpeed;
+
+          sections.push({
+            Distancia: data[i - 1].d.toFixed(3).replace('.', ','),
+            Velocidad: (Math.round(computedSpeed * 10) / 10).toFixed(1).replace('.', ','),
+            Tiempo: data[i - 1].tStr || formatSecsToTime(data[i - 1].t)
+          });
+
+          secStartIdx = i;
+          currSectionSpeed = data[i].v;
         }
-        final_d.push(distancias[distancias.length - 1]);
-        final_v.push(curr_v);
       }
 
-      calculatedSpeeds = [];
-      for (let i = 0; i < final_d.length; i++) {
-        calculatedSpeeds.push({
-          Distancia: final_d[i].toFixed(3).replace('.', ','),
-          Velocidad: String(final_v[i]).replace('.', ',')
-        });
-      }
+      const lastIdx = data.length - 1;
+      const finalSecDist = data[lastIdx].d - (secStartIdx === 0 ? 0 : data[secStartIdx - 1].d);
+      const finalSecTime = data[lastIdx].t - (secStartIdx === 0 ? 0 : data[secStartIdx - 1].t);
+      const computedSpeed = finalSecTime > 0 ? (finalSecDist / (finalSecTime / 3600.0)) : currSectionSpeed;
 
+      sections.push({
+        Distancia: data[lastIdx].d.toFixed(3).replace('.', ','),
+        Velocidad: (Math.round(computedSpeed * 10) / 10).toFixed(1).replace('.', ','),
+        Tiempo: data[lastIdx].tStr || formatSecsToTime(data[lastIdx].t)
+      });
+
+      calculatedSpeeds = sections;
       renderSpeedsTable(calculatedSpeeds);
     }
 
@@ -1042,6 +1105,7 @@ Devuelve SOLO un array JSON de pares [distancia, tiempo]:
         tr.innerHTML = `
           <td style="font-family:'Courier New', monospace; font-weight:700;">${s.Distancia}</td>
           <td style="font-family:'Courier New', monospace; font-weight:700; color:#0056b3;">${s.Velocidad}</td>
+          <td style="font-family:'Courier New', monospace; font-weight:700; color:#28a745;">${s.Tiempo}</td>
         `;
         tbody.appendChild(tr);
       });
