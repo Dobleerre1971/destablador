@@ -666,29 +666,33 @@
   </footer>
 
   <script>
-    const PROMPT_GLOBAL = `Eres un OCR de precisión militar y máxima velocidad para tablas de tiempos de rally.
-Tu objetivo es extraer la DISTANCIA y el TIEMPO ACUMULADO de TODAS las tablas de la imagen.
+    const PROMPT_GLOBAL = `Eres un OCR experto de máxima velocidad y precisión militar para documentos de rally de regularidad.
+Tu misión es extraer los datos estructurados según el tipo de documento de la imagen:
 
-ESTRUCTURA DE LA HOJA:
-- Hay VARIAS COLUMNAS de tablas lado a lado.
-- Lee de izquierda a derecha: empieza por la columna 1 de arriba a abajo, luego la columna 2 de arriba a abajo, etc.
+TIPO 1 - RUTÓMETRO DIRECTO (Distancia y Tiempo en la misma tabla):
+- Extrae la distancia en km ("d") y el tiempo acumulado ("t"):
+  Ejemplo: [{"d": "0,100", "t": "00:00:07,5"}, {"d": "1,000", "t": "00:01:15,0"}]
+  (Si la distancia viene en metros ej. 100 o 5.100, conviértela a km con coma ej. "0,100", "5,100").
+  (Si el tiempo viene en columnas H, MIN, SEG, combínalo en formato "00:MM:SS,d").
 
-REGLAS DE INTERPRETACIÓN:
-1. DISTANCIA (columna "Hasta" o "Dist"):
-   - Si está en metros (ej. 100, 200, 1.000, 5.100, 10.100, 23.319), CONVIÉRTELA a kilómetros con 3 decimales usando coma:
-     100 -> "0,100"
-     1.000 -> "1,000"
-     5.100 -> "5,100"
-     10.100 -> "10,100"
-     23.319 -> "23,319"
-2. TIEMPO (columnas "H", "MIN", "SEG" o "Tiempo"):
-   - Combina las columnas en formato "HH:MM:SS,d" (ej: H:0, MIN:07, SEG:19,1 -> "00:07:19,1").
-   - Si no tiene decimales en segundos, añade ,0 (ej: H:0, MIN:01, SEG:9 -> "00:01:09,0").
-3. Ignora encabezados, logos, notas a mano o tachones (lee el número original). Extrae TODAS las filas.
+TIPO 2 - TABLA DE TIEMPOS POR VIÑETAS / HITOS:
+- Hay columnas de número de "Viñeta" y "Tiempo":
+  Extrae el número de viñeta ("v") y el tiempo de paso ("t"):
+  Ejemplo: [{"v": 60, "t": "00:01:12,2"}, {"v": 62, "t": "00:01:51,2"}]
 
-FORMATO DE SALIDA (ESTRICTAMENTE ARRAY COMPACTO PARA MÁXIMA VELOCIDAD):
-Devuelve SOLO un array JSON de pares [distancia, tiempo]:
-[["0,100", "00:00:07,5"], ["0,200", "00:00:15,0"], ["5,100", "00:07:19,1"]]`;
+TIPO 3 - LIBRO DE RUTA / ROADBOOK (Viñetas con Distancia Total):
+- Hay viñetas numeradas (en recuadros negros/esquinas ej: 59, 60, 61...) y columna "DISTANCIA TOTAL":
+  Extrae el número de viñeta ("v") y la distancia total en km ("d"):
+  Ejemplo: [{"v": 59, "d": "0,000"}, {"v": 60, "d": "0,922"}, {"v": 61, "d": "1,080"}]
+
+REGLAS GENERALES:
+- Usa SIEMPRE coma para los decimales (ej. "0,922", "00:01:12,2").
+- Para tiempos, usa formato "00:MM:SS,d" o "HH:MM:SS,d".
+- Extrae TODAS las filas de la imagen.
+
+FORMATO DE SALIDA (ESTRICTAMENTE JSON ARRAY):
+Devuelve ÚNICAMENTE un array JSON con los objetos detectados:
+[{"v": 60, "d": "0,922"}, {"v": 60, "t": "00:01:12,2"}] o [{"d": "0,100", "t": "00:00:07,5"}]`;
 
     let fileQueue = [];
     let calculatedSpeeds = [];
@@ -854,28 +858,45 @@ Devuelve SOLO un array JSON de pares [distancia, tiempo]:
       }
       let clean = text.replace(/```json/g, '').replace(/```/g, '').trim();
       const firstBracket = clean.indexOf('[');
-      if (firstBracket !== -1) {
+      const firstBrace = clean.indexOf('{');
+
+      if (firstBracket !== -1 && (firstBrace === -1 || firstBracket < firstBrace)) {
         clean = clean.substring(firstBracket);
         const lastBracket = clean.lastIndexOf(']');
         if (lastBracket !== -1) {
           clean = clean.substring(0, lastBracket + 1);
         } else {
-          // Si quedó cortado, intentar cerrar el JSON
-          const lastComma = clean.lastIndexOf('],');
-          if (lastComma !== -1) {
-            clean = clean.substring(0, lastComma + 1) + ']';
-          } else {
-            clean = clean + ']';
-          }
+          clean = clean + ']';
+        }
+      } else if (firstBrace !== -1) {
+        clean = clean.substring(firstBrace);
+        const lastBrace = clean.lastIndexOf('}');
+        if (lastBrace !== -1) {
+          clean = clean.substring(0, lastBrace + 1);
         }
       }
-      clean = clean.replace(/,\s*\]/g, ']');
+
+      clean = clean.replace(/,\s*\]/g, ']').replace(/,\s*\}/g, '}');
+
       try {
         const parsed = JSON.parse(clean);
-        return Array.isArray(parsed) ? parsed : (parsed.rows || parsed.tablas || parsed.data || [parsed]);
+        if (Array.isArray(parsed)) return parsed;
+        for (const k in parsed) {
+          if (Array.isArray(parsed[k])) return parsed[k];
+        }
+        return [parsed];
       } catch (_) {
-        // Extractor de emergencia si el JSON está roto
+        // Extractor de emergencia por Regex
         const rows = [];
+        const objRegex = /\{[^{}]+\}/g;
+        let objMatch;
+        while ((objMatch = objRegex.exec(text)) !== null) {
+          try {
+            rows.push(JSON.parse(objMatch[0]));
+          } catch(e) {}
+        }
+        if (rows.length > 0) return rows;
+
         const regex = /\[\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\]/g;
         let match;
         while ((match = regex.exec(text)) !== null) {
@@ -1111,7 +1132,6 @@ Devuelve SOLO un array JSON de pares [distancia, tiempo]:
       btn.innerHTML = `<span class="spinner"></span> Procesando páginas en paralelo...`;
 
       try {
-        // Extraer todas las páginas/imágenes de todos los archivos seleccionados
         let allPages = [];
         for (const file of fileQueue) {
           const imgs = await convertFileToImagesBase64(file);
@@ -1126,19 +1146,24 @@ Devuelve SOLO un array JSON de pares [distancia, tiempo]:
         const promises = allPages.map(b64 => processImagesWithAI([b64]));
         const results = await Promise.all(promises);
 
-        let totalRows = [];
-        results.forEach(rows => {
-          if (rows && rows.length > 0) {
-            totalRows = totalRows.concat(rows);
+        let rawItems = [];
+        results.forEach(items => {
+          if (items && items.length > 0) {
+            rawItems = rawItems.concat(items);
           }
         });
 
-        if (totalRows.length > 0) {
-          populateExtractedTable(totalRows);
-          fileQueue = [];
-          renderQueue();
+        if (rawItems.length > 0) {
+          const reconciledRows = reconcileExtractedData(rawItems);
+          if (reconciledRows.length > 0) {
+            populateExtractedTable(reconciledRows);
+            fileQueue = [];
+            renderQueue();
+          } else {
+            alert("⚠️ No se pudieron emparejar las distancias y tiempos.");
+          }
         } else {
-          alert("⚠️ No se detectó ninguna tabla en las imágenes.");
+          alert("⚠️ No se detectó ninguna tabla o libro de ruta en las imágenes.");
         }
       } catch (err) {
         alert("❌ Error: " + err.message);
@@ -1146,6 +1171,88 @@ Devuelve SOLO un array JSON de pares [distancia, tiempo]:
         btn.disabled = false;
         btn.innerHTML = `<i class="fa-solid fa-bolt"></i> PROCESAR CON IA`;
       }
+    }
+
+    // --- RECONCILIACIÓN Y CRUCE INTELIGENTE DE VIÑETAS / TABLAS DIRECTAS ---
+    function reconcileExtractedData(totalItems) {
+      const directRows = [];
+      const vinetaDist = {};
+      const vinetaTime = {};
+
+      totalItems.forEach(item => {
+        if (Array.isArray(item)) {
+          if (item.length >= 2 && item[0] && item[1]) {
+            directRows.push({ d: String(item[0]).trim(), t: String(item[1]).trim() });
+          }
+        } else if (typeof item === 'object' && item !== null) {
+          const v = item.v !== undefined ? String(item.v).trim() : (item.vineta !== undefined ? String(item.vineta).trim() : null);
+          const d = item.d !== undefined ? item.d : (item.distancia || item.dist || item["Distancia (km)"] || item["distancia_km"] || null);
+          const t = item.t !== undefined ? item.t : (item.tiempo || item.time || item["Tiempo"] || null);
+
+          if (d && t) {
+            directRows.push({ d: String(d).trim(), t: String(t).trim(), v: v });
+          } else if (v !== null && d) {
+            vinetaDist[v] = String(d).trim();
+          } else if (v !== null && t) {
+            vinetaTime[v] = String(t).trim();
+          }
+        }
+      });
+
+      // Cruzar datos de viñetas (Libro de Ruta + Hoja de Tiempos)
+      const matchedVinetaRows = [];
+      const vinetasConTiempo = Object.keys(vinetaTime);
+
+      if (vinetasConTiempo.length > 0 && Object.keys(vinetaDist).length > 0) {
+        // Encontrar viñeta inicial de salida si dist = 0,000
+        for (const v in vinetaDist) {
+          const dNum = parseFloat(vinetaDist[v].replace(',', '.')) || 0;
+          if (dNum === 0 && !vinetaTime[v]) {
+            vinetaTime[v] = "00:00:00,0";
+            if (!vinetasConTiempo.includes(v)) vinetasConTiempo.push(v);
+            break;
+          }
+        }
+
+        vinetasConTiempo.forEach(v => {
+          if (vinetaDist[v] && vinetaTime[v]) {
+            matchedVinetaRows.push({
+              d: vinetaDist[v],
+              t: vinetaTime[v],
+              v: v
+            });
+          }
+        });
+      }
+
+      let allRows = directRows.concat(matchedVinetaRows);
+
+      // Si solo llegaron datos de viñeta sin cruce
+      if (allRows.length === 0) {
+        for (const v in vinetaDist) {
+          allRows.push({ d: vinetaDist[v], t: vinetaTime[v] || "00:00:00,0", v: v });
+        }
+      }
+
+      // Ordenar por distancia ascendente
+      allRows.sort((a, b) => {
+        const da = parseFloat(String(a.d).replace(',', '.')) || 0;
+        const db = parseFloat(String(b.d).replace(',', '.')) || 0;
+        return da - db;
+      });
+
+      // Filtrar distancias duplicadas exactas
+      const unique = [];
+      const seenDist = new Set();
+      allRows.forEach(r => {
+        const dKey = String(r.d).replace(',', '.');
+        if (!seenDist.has(dKey)) {
+          seenDist.add(dKey);
+          unique.push(r);
+        }
+      });
+
+      return unique;
     }
 
     function populateExtractedTable(rows) {
@@ -1233,81 +1340,80 @@ Devuelve SOLO un array JSON de pares [distancia, tiempo]:
       return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${intSec},${decSec}`;
     }
 
-    // --- CÁLCULO INTELIGENTE DE MEDIAS Y TIEMPO DE PASO ---
+    // --- CÁLCULO DE MEDIAS POR TRAMOS SEGÚN ESTÁNDAR CRISARTECH ---
     function recalculateSpeeds() {
       const trs = document.querySelectorAll('#tbodyExtracted tr');
       const data = [];
-      let prev_d = 0.0, prev_t = 0.0;
 
       trs.forEach(tr => {
         const inputs = tr.querySelectorAll('input');
         if (inputs.length >= 2) {
           const dStr = inputs[0].value.trim().replace(',', '.');
           const tStr = inputs[1].value.trim();
-          const d = parseFloat(dStr) || 0.0;
+          const d = parseFloat(dStr);
           const t = parseTimeToSeconds(tStr);
 
-          const delta_d = d - prev_d;
-          const delta_t = t - prev_t;
-          const inst_v = (delta_t > 0 && delta_d > 0) ? (delta_d / (delta_t / 3600.0)) : 0.0;
-
-          data.push({
-            d: d,
-            t: t,
-            tStr: tStr,
-            v: inst_v
-          });
-
-          prev_d = d;
-          prev_t = t;
+          if (!isNaN(d) && tStr) {
+            data.push({
+              d: d,
+              t: t,
+              tStr: tStr || formatSecsToTime(t)
+            });
+          }
         }
       });
 
-      if (data.length === 0) {
+      if (data.length < 2) {
         calculatedSpeeds = [];
         renderSpeedsTable([]);
         return;
       }
 
-      // Agrupación de tramos de velocidad constante con tolerancia para jitter de décimas
-      const sections = [];
-      let secStartIdx = 0;
-      let currSectionSpeed = data[0].v;
+      // Ordenar por distancia ascendente
+      data.sort((a, b) => a.d - b.d);
 
+      // Calcular la velocidad media de cada sector hasta cada punto de paso (Distancia FIN de sector)
+      const rawPoints = [];
       for (let i = 1; i < data.length; i++) {
-        const secDist = data[i].d - (secStartIdx === 0 ? 0 : data[secStartIdx - 1].d);
-        const secTime = data[i].t - (secStartIdx === 0 ? 0 : data[secStartIdx - 1].t);
-        const avgSectionSpeed = secTime > 0 ? (secDist / (secTime / 3600.0)) : currSectionSpeed;
+        const delta_d = data[i].d - data[i - 1].d;
+        const delta_t = data[i].t - data[i - 1].t;
+        const v = (delta_t > 0 && delta_d > 0) ? (delta_d / (delta_t / 3600.0)) : 0.0;
+        const vFormatted = (Math.round(v * 100) / 100).toFixed(2).replace('.', ',');
 
-        // Cambio real de media (salto mayor a 1.8 km/h)
-        if (data[i].v > 0 && Math.abs(data[i].v - avgSectionSpeed) > 1.8) {
-          const finalSecDist = data[i - 1].d - (secStartIdx === 0 ? 0 : data[secStartIdx - 1].d);
-          const finalSecTime = data[i - 1].t - (secStartIdx === 0 ? 0 : data[secStartIdx - 1].t);
-          const computedSpeed = finalSecTime > 0 ? (finalSecDist / (finalSecTime / 3600.0)) : currSectionSpeed;
-
-          sections.push({
-            Distancia: data[i - 1].d.toFixed(3).replace('.', ','),
-            Velocidad: (Math.round(computedSpeed * 10) / 10).toFixed(1).replace('.', ','),
-            Tiempo: data[i - 1].tStr || formatSecsToTime(data[i - 1].t)
-          });
-
-          secStartIdx = i;
-          currSectionSpeed = data[i].v;
-        }
+        rawPoints.push({
+          dNum: data[i].d,
+          Distancia: data[i].d.toFixed(3).replace('.', ','),
+          Velocidad: vFormatted,
+          vNum: Math.round(v * 100) / 100,
+          Tiempo: data[i].tStr
+        });
       }
 
-      const lastIdx = data.length - 1;
-      const finalSecDist = data[lastIdx].d - (secStartIdx === 0 ? 0 : data[secStartIdx - 1].d);
-      const finalSecTime = data[lastIdx].t - (secStartIdx === 0 ? 0 : data[secStartIdx - 1].t);
-      const computedSpeed = finalSecTime > 0 ? (finalSecDist / (finalSecTime / 3600.0)) : currSectionSpeed;
+      // Consolidar tramos consecutivos con la misma media (tolerancia +-0.4 km/h)
+      const consolidated = [];
+      let currentSection = null;
 
-      sections.push({
-        Distancia: data[lastIdx].d.toFixed(3).replace('.', ','),
-        Velocidad: (Math.round(computedSpeed * 10) / 10).toFixed(1).replace('.', ','),
-        Tiempo: data[lastIdx].tStr || formatSecsToTime(data[lastIdx].t)
-      });
+      for (let i = 0; i < rawPoints.length; i++) {
+        const pt = rawPoints[i];
+        if (!currentSection) {
+          currentSection = { ...pt };
+        } else {
+          if (Math.abs(pt.vNum - currentSection.vNum) <= 0.4) {
+            // Misma media: actualizamos la distancia final del tramo
+            currentSection.dNum = pt.dNum;
+            currentSection.Distancia = pt.Distancia;
+            currentSection.Tiempo = pt.Tiempo;
+          } else {
+            consolidated.push(currentSection);
+            currentSection = { ...pt };
+          }
+        }
+      }
+      if (currentSection) {
+        consolidated.push(currentSection);
+      }
 
-      calculatedSpeeds = sections;
+      calculatedSpeeds = consolidated;
       renderSpeedsTable(calculatedSpeeds);
     }
 
@@ -1325,30 +1431,41 @@ Devuelve SOLO un array JSON de pares [distancia, tiempo]:
       });
     }
 
-    // --- EXPORTACIÓN A CSV ---
+    // --- EXPORTACIÓN A CSV CRISARTECH (Cabecera oficial y sin 0,000) ---
     function exportCSV() {
       if (!calculatedSpeeds || calculatedSpeeds.length === 0) {
         alert("⚠️ No hay medias calculadas para exportar.");
         return;
       }
 
-      const zr = document.getElementById('inputZr').value.trim();
-      const numMedias = parseInt(document.getElementById('selectNumMedias').value) || 2;
+      const zrInput = document.getElementById('inputZr').value.trim();
+      const numMedias = parseInt(document.getElementById('selectNumMedias').value) || 1;
 
-      let csvContent = "";
+      // Cabecera estándar Crisartech
+      let headers = ["Distancia"];
+      for (let i = 1; i <= numMedias; i++) {
+        headers.push(numMedias === 1 ? "Velocidad" : `Velocidad ${i}`);
+      }
+      let csvContent = headers.join(";") + "\r\n";
+
       calculatedSpeeds.forEach(row => {
-        let line = [row.Distancia];
-        for (let i = 0; i < numMedias; i++) {
-          line.push(row.Velocidad);
+        const dVal = parseFloat(String(row.Distancia).replace(',', '.')) || 0;
+        // En Crisartech nunca va la distancia 0,000
+        if (dVal > 0) {
+          let line = [row.Distancia];
+          for (let i = 0; i < numMedias; i++) {
+            line.push(row.Velocidad);
+          }
+          csvContent += line.join(";") + "\r\n";
         }
-        csvContent += line.join(";") + "\r\n";
       });
 
+      const zrNum = zrInput ? (zrInput.length === 1 ? '0' + zrInput : zrInput) : '01';
       const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
       const url = URL.createObjectURL(blob);
       const link = document.createElement("a");
       link.setAttribute("href", url);
-      link.setAttribute("download", `zr${zr || '7'}.csv`);
+      link.setAttribute("download", `zr${zrNum}.csv`);
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
